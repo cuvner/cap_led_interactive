@@ -58,12 +58,17 @@ def init_oled():
     display = adafruit_displayio_ssd1306.SSD1306(display_bus, width=128, height=32)
     return display
 
-def display_wifi_status(display, message):
-    # Clear previous content
-    #display.fill(0)  # Assuming 0 is the color code for black (no pixel)
-    # Create a text label
-    text_area = label.Label(terminalio.FONT, text=message, color=0xFFFFFF, x=display.width - 30, y=10)
-    display.show(text_area)
+def init_wifi_status_label(display):
+    # Initialize the WiFi status label with empty text
+    wifi_status_label = label.Label(terminalio.FONT, text="", color=0xFFFFFF)
+    display.show(wifi_status_label)
+    return wifi_status_label
+
+def update_wifi_status(display, wifi_status_label, text):
+    # Update the text and adjust position for right justification
+    wifi_status_label.text = text
+    wifi_status_label.x = display.width - len(text) * 6  # 6 is an approximation for char width
+
 
 def create_splash(display):
     splash = displayio.Group()
@@ -87,87 +92,113 @@ def create_osc_client(socket_pool):
         osc_client = microosc.OSCClient(socket_pool, "224.0.0.1", 5000)
         return osc_client
     except Exception as e:
-        return None
+        return None      
+    
+def send_osc_message(osc_client, message):
+    try:
+        osc_client.send(message)
+    except BrokenPipeError:
+        # Attempt to reconnect and resend the message
+        try:
+            # Recreate the OSC client or reinitialize the connection
+            osc_client = create_osc_client(socketpool.SocketPool(wifi.radio))
+            osc_client.send(message)
+        except Exception as e:
+            print("Error re-establishing OSC connection:", e)
 
-def scroll_text(text_area, text, display, delay=0.3):
-    if len(text) * 6 > 128:  # Estimate width of text
-        for i in range(len(text) * 6 - 128 + 1):
-            text_area.x = -i
-            display.refresh()
-            time.sleep(delay)
-        text_area.x = 0  # Reset position after scrolling
+def check_wifi_connection():
+    try:
+        # Attempt to get the current IP address as a way to check connectivity
+        ip_address = wifi.radio.ipv4_address
+        return ip_address is not None
+    except Exception as e:
+        # Handle exceptions if WiFi module is not responding
+        return False  
 
-def text(text_area, text, delay=0.3):
-    text_area.x = 0
-    display.refresh()
-    time.sleep(delay)
-    text_area.x = 0  # Reset position after scrolling
-       
+def reconnect_to_wifi(display):
+    try:
+        ssid = os.getenv("WIFI_SSID")
+        password = os.getenv("WIFI_PASSWORD")
+        wifi.radio.connect(ssid, password)
+        return True
+    except Exception as e:
+        # Update the display with an error message if needed
+        return False
+          
+
 
 def main():
     display = init_oled()
+    splash = create_splash(display)
 
-    # Create and display the initial connecting message
-    text_area = label.Label(terminalio.FONT, text="WiFi connecting....", color=0xFFFFFF, x=0, y=display.height // 2 - 3)
-    display.show(text_area)
-    display.refresh()  # Ensure the display is updated with the message
+    # check wifi
+    wifi_connected = True  # Initial assumption
+    last_check_time = time.monotonic()
+    check_interval = 10  # Time in seconds between checks
 
-    # Attempt to connect to WiFi and update the display based on the outcome
+
+    # Display the initial "WiFi connecting...." message
+    initial_message_label = label.Label(terminalio.FONT, text="WiFi connecting....", color=0xFFFFFF, x=0, y=display.height // 2 - 3)
+    splash.append(initial_message_label)
+    display.show(splash)
+
+    # Connect to WiFi and update WiFi status label
     ip_address = connect_to_wifi(display)
-    if ip_address:
-        display_wifi_status(display, "W")  # WiFi connected
-    else:
-        display_wifi_status(display, "X")  # WiFi not connected
-    # Display initial connecting message
-    text_area = label.Label(terminalio.FONT, text="WiFi connecting....", color=0xFFFFFF, x=0, y=display.height // 2 - 3)
-    display.show(text_area)
 
-#wifi and osc setup
-    message = ""
-    if ip_address:
-        socket_pool = socketpool.SocketPool(wifi.radio)
-        osc_client = create_osc_client(socket_pool)
-        if osc_client:
-            display_wifi_status(display, "W-Osc")  # WiFi connected
-            #message = "Connected: {}\nOSC Ready".format(ip_address)
-        else:
-            message = "OSC Error"
-    else:
-        message = "WiFi Error"
-    text_area.text = message
-    scroll_text(text_area, message, display)  # Correctly passing the display object
+    # Initialize WiFi status label
+    wifi_status_label = label.Label(terminalio.FONT, text="W-Osc" if ip_address else "No WiFi", color=0xFFFFFF, x=display.width - 35, y=6)
+    splash.append(wifi_status_label)
+
+    # Initialize the touch pad message label and remove the initial message
+    touch_message_label = label.Label(terminalio.FONT, text="Touch a pad!", color=0xFFFFFF, x=0, y=display.height // 2 + 3 )
+    splash.append(touch_message_label)
+    splash.remove(initial_message_label)
+
     display.refresh()
+
+    # Setup OSC client if connected to WiFi
+    osc_client = create_osc_client(socketpool.SocketPool(wifi.radio)) if ip_address else None
 
     # Touch Pad Setup
     touch_pad = adafruit_mpr121.MPR121(board.I2C())
-
     last_touch_time = None
+    last_wifi_check = time.monotonic()
+    wifi_check_interval = 5  # Time in seconds to check WiFi status
 
     while True:
+
+        current_time = time.monotonic()
+
+        # Periodically check WiFi status
+        if current_time - last_wifi_check > wifi_check_interval:
+            wifi_connected = check_wifi_connection()
+            if not wifi_connected:
+                wifi_connected = reconnect_to_wifi(display)
+            wifi_status_label.text = "W-Osc" if wifi_connected else "No WiFi"
+            last_wifi_check = current_time
+            
+        # Touch pad detection logic
         touch_detected = False
         for i in range(12):
             if touch_pad[i].value:
                 touch_detected = True
-                color = get_color_for_pad(i)
-                fill_up_leds(color)  # Fill up LEDs with the color of the touched pad 
-                text_area.text = 'Touched pad #{}!'.format(i)
-                scroll_text(text_area, text_area.text, display.width)
-                display.refresh()
-                if osc_client:
-                    msg = microosc.OscMsg("/touch", [i], ("i",))
-                    #osc_client.send(msg)
-                    print(msg)
+                touch_message_label.text = f'Touched pad #{i + 1}!'
+                fill_up_leds(get_color_for_pad(i))  # Fill up LEDs with the color of the touched pad
+
+                if osc_client and touch_detected:
+                    osc_message = microosc.OscMsg("/touch", [i], ("i",))
+                    send_osc_message(osc_client, osc_message)
+
                 last_touch_time = time.monotonic()
                 break
 
         if not touch_detected and last_touch_time and (time.monotonic() - last_touch_time > 5):
-            # Reset the text after 5 seconds of no activity
-            text_area.text = "Touch a pad!"
-            display.refresh()
-            reset_leds()  # Reset LEDs after 5 seconds of no activity
-            last_touch_time = None  # Reset the timer
+            touch_message_label.text = "Touch a pad!"
+            reset_leds()
+            last_touch_time = None
 
-        time.sleep(0.1)
+        display.refresh()
+        time.sleep(0.2)
 
 if __name__ == "__main__":
     main()
