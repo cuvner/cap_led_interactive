@@ -58,20 +58,29 @@ def init_oled():
     display = adafruit_displayio_ssd1306.SSD1306(display_bus, width=128, height=32)
     return display
 
+def display_wifi_status(display, message):
+    # Clear previous content
+    #display.fill(0)  # Assuming 0 is the color code for black (no pixel)
+    # Create a text label
+    text_area = label.Label(terminalio.FONT, text=message, color=0xFFFFFF, x=display.width - 30, y=10)
+    display.show(text_area)
+
 def create_splash(display):
     splash = displayio.Group()
     display.root_group = splash
     # Add your display elements here...
     return splash
 
-def connect_to_wifi():
+def connect_to_wifi(display):
     ssid = os.getenv("WIFI_SSID")
     password = os.getenv("WIFI_PASSWORD")
     try:
         wifi.radio.connect(ssid, password)
-        return wifi.radio.ipv4_address
+        # You can update the display within this function, if you wish
+        return True
     except Exception as e:
-        return None
+        return False
+
 
 def create_osc_client(socket_pool):
     try:
@@ -97,19 +106,30 @@ def text(text_area, text, delay=0.3):
 
 def main():
     display = init_oled()
-    splash = create_splash(display)
 
-    text_area = label.Label(terminalio.FONT, text="", color=0xFFFFFF, x=0, y=display.height // 2 - 3)
-    splash.append(text_area)
+    # Create and display the initial connecting message
+    text_area = label.Label(terminalio.FONT, text="WiFi connecting....", color=0xFFFFFF, x=0, y=display.height // 2 - 3)
+    display.show(text_area)
+    display.refresh()  # Ensure the display is updated with the message
 
-    # WiFi and OSC Setup
-    ip_address = connect_to_wifi()
+    # Attempt to connect to WiFi and update the display based on the outcome
+    ip_address = connect_to_wifi(display)
+    if ip_address:
+        display_wifi_status(display, "W")  # WiFi connected
+    else:
+        display_wifi_status(display, "X")  # WiFi not connected
+    # Display initial connecting message
+    text_area = label.Label(terminalio.FONT, text="WiFi connecting....", color=0xFFFFFF, x=0, y=display.height // 2 - 3)
+    display.show(text_area)
+
+#wifi and osc setup
     message = ""
     if ip_address:
         socket_pool = socketpool.SocketPool(wifi.radio)
         osc_client = create_osc_client(socket_pool)
         if osc_client:
-            message = "Connected: {}\nOSC Ready".format(ip_address)
+            display_wifi_status(display, "W-Osc")  # WiFi connected
+            #message = "Connected: {}\nOSC Ready".format(ip_address)
         else:
             message = "OSC Error"
     else:
@@ -135,7 +155,7 @@ def main():
                 display.refresh()
                 if osc_client:
                     msg = microosc.OscMsg("/touch", [i], ("i",))
-                    osc_client.send(msg)
+                    #osc_client.send(msg)
                     print(msg)
                 last_touch_time = time.monotonic()
                 break
